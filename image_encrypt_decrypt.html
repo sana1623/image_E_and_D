@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Image Encrypt / Decrypt — Compact UI</title>
+  <style>
+    :root{--card-bg:#fff;--muted:#666}
+    body{font-family:system-ui,Segoe UI,Roboto,'Noto Sans',sans-serif;max-width:1100px;margin:12px auto;padding:12px;background:#f5f6f8}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .card{background:var(--card-bg);border-radius:10px;padding:10px;box-shadow:0 4px 14px rgba(0,0,0,0.06);margin-bottom:10px;flex:1}
+    label{display:block;margin:6px 0 4px;font-weight:600}
+    input,button,select{padding:6px 8px;border-radius:8px;border:1px solid #ddd;font-size:14px}
+    button{cursor:pointer}
+    small{color:var(--muted)}
+
+    /* compact list box with both scrollbars */
+    .listbox{border:1px solid #e5e7eb;border-radius:8px;height:190px;overflow:auto;background:#fafafa}
+    .file-row{display:grid;grid-template-columns:20px 1fr 90px 86px;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px dashed #eee;min-width:620px}
+    .file-row:last-child{border-bottom:0}
+    .file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .muted{color:var(--muted)}
+    .status{font-size:13px}
+    .actions{display:flex;gap:6px}
+
+    /* preview side (kept small) */
+    .preview{background:#0f172a;color:#e5e7eb;border-radius:10px;padding:8px;min-width:260px}
+    .frame{width:100%;max-width:600px;height:320px;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .thumbs{height:190px;overflow:auto;display:grid;grid-template-columns:repeat(3,100px);gap:6px;margin-top:6px}
+    .thumb{border-radius:8px;border:1px solid #e5e7eb;overflow:hidden}
+    .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+
+    @media(max-width:900px){
+      .file-row{min-width:780px} /* force horizontal scroll on small screens */
+      .frame{height:240px}
+    }
+  </style>
+</head>
+<body>
+  <h3>Image Encrypt / Decrypt — Compact • Bulk • Multi‑Preview</h3>
+
+  <div class="row">
+    <div class="card" style="flex:2">
+      <label>Encrypt — upload images (multiple)</label>
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:1;min-width:260px">
+          <input id="files-to-encrypt" type="file" accept="image/*" multiple />
+          <div class="listbox" id="enc-file-list"></div>
+        </div>
+        <div style="min-width:260px">
+          <label style="margin-top:0">Bulk password</label>
+          <input id="bulk-enc-pass" type="password" placeholder="সব ছবির জন্য এক পাসওয়ার্ড" />
+          <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            <button id="btn-encrypt-all">Encrypt Selected</button>
+            <button id="btn-encrypt-individual">Encrypt Individually</button>
+            <button id="btn-download-all-encrypted">Download All Encrypted (.zip)</button>
+          </div>
+          <small>স্ট্যাটাস কলামে 🔒 encrypted / 🟡 pending দেখবে।</small>
+        </div>
+      </div>
+      <div id="enc-results" style="margin-top:6px"></div>
+    </div>
+
+    <div class="preview" style="flex:1">
+      <div><small>Selected preview (অ্যাসপেক্ট রেশিও auto)</small></div>
+      <div class="frame" id="large-frame"><div id="large-placeholder" style="color:#666">কোনো ইমেজ নির্বাচন করা হয়নি</div></div>
+      <div id="large-meta" style="font-size:12px;margin-top:6px"></div>
+      <div class="thumbs" id="thumbs"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:1;min-width:260px">
+        <label>Decrypt — upload .enc files (multiple)</label>
+        <input id="files-to-decrypt" type="file" accept=".enc,application/octet-stream" multiple />
+        <div class="listbox" id="dec-file-list"></div>
+      </div>
+      <div style="min-width:260px">
+        <label style="margin-top:0">Bulk password</label>
+        <input id="bulk-dec-pass" type="password" placeholder="যে পাসওয়ার্ডে এনক্রিপ্ট করেছিলে" />
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <button id="btn-decrypt-all">Decrypt Selected</button>
+          <button id="btn-decrypt-individual">Decrypt Individually</button>
+          <button id="btn-download-all-decrypted">Download All Decrypted (.zip)</button>
+        </div>
+        <small>স্ট্যাটাসে 🔒 locked → 🔓 decrypted / ⚠️ failed দেখাবে।</small>
+      </div>
+    </div>
+    <div id="dec-results" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <small>ফরম্যাট: [salt(16)] + [iv(12)] + [ciphertext] • PBKDF2‑SHA256 (250k) • AES‑GCM‑256 • সব কাজ ব্রাউজারে।</small>
+  </div>
+
+<script>
+// ====== Crypto helpers ======
+const enc = new TextEncoder();
+function randomBytes(len){ const b = new Uint8Array(len); crypto.getRandomValues(b); return b; }
+async function deriveKey(password, salt){
+  const pwKey = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:250000, hash:'SHA-256'}, pwKey, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+}
+async function encryptArrayBuffer(dataBuffer, password){
+  const salt = randomBytes(16), iv = randomBytes(12), key = await deriveKey(password, salt);
+  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, dataBuffer);
+  const out = new Uint8Array(28 + ciphertext.byteLength); // 16+12 + ct
+  out.set(salt,0); out.set(iv,16); out.set(new Uint8Array(ciphertext),28);
+  return out.buffer;
+}
+async function decryptArrayBuffer(encBuffer, password){
+  const arr = new Uint8Array(encBuffer); if(arr.byteLength<28) throw new Error('Invalid file');
+  const salt = arr.slice(0,16), iv = arr.slice(16,28), ct = arr.slice(28);
+  const key = await deriveKey(password, salt);
+  return crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct);
+}
+async function fileToArrayBuffer(file){ return new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.onerror=rej; fr.readAsArrayBuffer(file); }); }
+
+// ====== Minimal ZIP (STORE) with UTF‑8 filenames ======
+function crc32(buf){
+  const table = (function(){ let t=new Uint32Array(256); for(let i=0;i<256;i++){ let c=i; for(let k=0;k<8;k++){ c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); } t[i]=c; } return t; })();
+  let crc=0xFFFFFFFF; for(let i=0;i<buf.length;i++) crc=(crc>>>8)^table[(crc^buf[i])&0xFF]; return (crc^0xFFFFFFFF)>>>0;
+}
+function isAscii(str){ for(let i=0;i<str.length;i++) if(str.charCodeAt(i)>127) return false; return true; }
+function msDosTimeDate(d){ const sec=Math.floor(d.getSeconds()/2), min=d.getMinutes(), hour=d.getHours(); const time=(hour<<11)|(min<<5)|sec; const year=d.getFullYear(), mon=d.getMonth()+1, day=d.getDate(); const date=((year-1980)<<9)|(mon<<5)|day; return {time,date}; }
+function makeZip(files){ // [{name,data:Uint8Array}]
+  const local=[], central=[]; let offset=0; const now=msDosTimeDate(new Date());
+  for(const f of files){
+    const name=f.name||'file', utf8=new TextEncoder().encode(name), useUtf8=!isAscii(name);
+    const data=f.data, size=data.length, crc=crc32(data), flags=useUtf8?0x0800:0;
+    const lf=new Uint8Array(30+utf8.length+size); let p=0;
+    lf.set([0x50,0x4b,0x03,0x04,20,0, flags&0xFF,(flags>>>8)&0xFF, 0,0, now.time&0xFF,(now.time>>>8)&0xFF, now.date&0xFF,(now.date>>>8)&0xFF],0); p=14;
+    lf[p++]=crc&0xFF; lf[p++]=(crc>>>8)&0xFF; lf[p++]=(crc>>>16)&0xFF; lf[p++]=(crc>>>24)&0xFF;
+    for(let k=0;k<4;k++) lf[p++]=(size>>>(8*k))&0xFF; for(let k=0;k<4;k++) lf[p++]=(size>>>(8*k))&0xFF;
+    lf[p++]=utf8.length&0xFF; lf[p++]=(utf8.length>>>8)&0xFF; lf[p++]=0; lf[p++]=0; // name & extra
+    lf.set(utf8,p); p+=utf8.length; lf.set(data,p); p+=size;
+    local.push({buf:lf, offset}); offset+=lf.length;
+    const cd=new Uint8Array(46+utf8.length); p=0;
+    cd.set([0x50,0x4b,0x01,0x02, 20,0, 20,0, flags&0xFF,(flags>>>8)&0xFF, 0,0, now.time&0xFF,(now.time>>>8)&0xFF, now.date&0xFF,(now.date>>>8)&0xFF],0); p=16;
+    cd[p++]=crc&0xFF; cd[p++]=(crc>>>8)&0xFF; cd[p++]=(crc>>>16)&0xFF; cd[p++]=(crc>>>24)&0xFF;
+    for(let k=0;k<4;k++) cd[p++]=(size>>>(8*k))&0xFF; for(let k=0;k<4;k++) cd[p++]=(size>>>(8*k))&0xFF;
+    cd[p++]=utf8.length&0xFF; cd[p++]=(utf8.length>>>8)&0xFF; cd[p++]=0; cd[p++]=0; cd[p++]=0; cd[p++]=0; cd[p++]=0; cd[p++]=0; // extra, comment, disk
+    cd[p++]=0; cd[p++]=0; cd[p++]=0; cd[p++]=0; // internal/external attrs
+    const rel=local[local.length-1].offset; for(let k=0;k<4;k++) cd[p++]=(rel>>>(8*k))&0xFF; cd.set(utf8,p); p+=utf8.length;
+    central.push(cd);
+  }
+  const cdSize=central.reduce((s,c)=>s+c.length,0), cdOffset=local.reduce((s,l)=>s+l.buf.length,0);
+  const out=new Uint8Array(cdOffset+cdSize+22); let ptr=0; for(const l of local){ out.set(l.buf,ptr); ptr+=l.buf.length; } for(const c of central){ out.set(c,ptr); ptr+=c.length; }
+  out.set([0x50,0x4b,0x05,0x06,0,0,0,0, central.length&0xFF,(central.length>>>8)&0xFF, central.length&0xFF,(central.length>>>8)&0xFF, cdSize&0xFF,(cdSize>>>8)&0xFF,(cdSize>>>16)&0xFF,(cdSize>>>24)&0xFF, cdOffset&0xFF,(cdOffset>>>8)&0xFF,(cdOffset>>>16)&0xFF,(cdOffset>>>24)&0xFF, 0,0], ptr);
+  return out.buffer;
+}
+function triggerDownload(blob, filename){ const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1200); }
+
+// ====== UI state ======
+const filesToEncrypt=document.getElementById('files-to-encrypt');
+const encFileList=document.getElementById('enc-file-list');
+const bulkEncPass=document.getElementById('bulk-enc-pass');
+const btnEncryptAll=document.getElementById('btn-encrypt-all');
+const btnEncryptInd=document.getElementById('btn-encrypt-individual');
+const btnDownloadAllEncrypted=document.getElementById('btn-download-all-encrypted');
+const encResults=document.getElementById('enc-results');
+
+const filesToDecrypt=document.getElementById('files-to-decrypt');
+const decFileList=document.getElementById('dec-file-list');
+const bulkDecPass=document.getElementById('bulk-dec-pass');
+const btnDecryptAll=document.getElementById('btn-decrypt-all');
+const btnDecryptInd=document.getElementById('btn-decrypt-individual');
+const btnDownloadAllDecrypted=document.getElementById('btn-download-all-decrypted');
+const decResults=document.getElementById('dec-results');
+
+const thumbs=document.getElementById('thumbs');
+const largeFrame=document.getElementById('large-frame');
+const largeMeta=document.getElementById('large-meta');
+
+let encFiles=[], decFiles=[], encOutputs=[], decOutputs=[];
+let encStatusEls=[], decStatusEls=[]; // store per-row status spans
+
+function clearChildren(el){ while(el.firstChild) el.removeChild(el.firstChild); }
+
+function addEncRow(file,i){
+  const row=document.createElement('div'); row.className='file-row';
+  const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=true; cb.dataset.index=i;
+  const name=document.createElement('div'); name.className='file-name'; name.textContent=file.name;
+  const size=document.createElement('div'); size.className='muted'; size.textContent=Math.round(file.size/1024)+' KB';
+  const status=document.createElement('div'); status.className='status'; status.textContent='🟡 pending';
+  encStatusEls[i]=status;
+  const act=document.createElement('div'); act.className='actions';
+  const view=document.createElement('button'); view.textContent='Preview'; view.onclick=()=>{ const fr=new FileReader(); fr.onload=()=>showLargePreview(file,fr.result); fr.readAsDataURL(file);} 
+  act.appendChild(view);
+  row.appendChild(cb); row.appendChild(name); row.appendChild(size); row.appendChild(status); row.appendChild(act);
+  return row;
+}
+function addDecRow(file,i){
+  const row=document.createElement('div'); row.className='file-row';
+  const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=true; cb.dataset.index=i;
+  const name=document.createElement('div'); name.className='file-name'; name.textContent=file.name;
+  const size=document.createElement('div'); size.className='muted'; size.textContent=Math.round(file.size/1024)+' KB';
+  const status=document.createElement('div'); status.className='status'; status.textContent='🔒 locked';
+  decStatusEls[i]=status;
+  const act=document.createElement('div'); act.className='actions';
+  const openBtn=document.createElement('button'); openBtn.textContent='Peek'; openBtn.onclick=async()=>{
+    try{ const arr=await fileToArrayBuffer(file); const p=bulkDecPass.value||prompt('Password?'); if(!p) return; const plain=await decryptArrayBuffer(arr,p); const url=URL.createObjectURL(new Blob([plain])); const w=window.open(''); w.document.write(`<img src="${url}" style="max-width:100%">`); }
+    catch(e){ alert('ডিক্রিপ্টে ব্যর্থ: '+e.message); }
+  };
+  act.appendChild(openBtn);
+  row.appendChild(cb); row.appendChild(name); row.appendChild(size); row.appendChild(status); row.appendChild(act);
+  return row;
+}
+
+function createThumb(file){ const wrap=document.createElement('div'); wrap.className='thumb'; const img=document.createElement('img'); wrap.appendChild(img); const fr=new FileReader(); fr.onload=()=>{ img.src=fr.result; }; fr.readAsDataURL(file); wrap.onclick=()=>{ const fr2=new FileReader(); fr2.onload=()=>showLargePreview(file,fr2.result); fr2.readAsDataURL(file); }; return wrap; }
+
+function showLargePreview(file,dataUrl){ clearChildren(largeFrame); const img=document.createElement('img'); img.src=dataUrl; img.style.width='100%'; img.style.height='100%'; img.style.objectFit='contain'; img.onload=()=>{ const w=img.naturalWidth||img.width, h=img.naturalHeight||img.height; largeMeta.textContent=`${file.name} — ${w}×${h} — ${Math.round(file.size/1024)} KB`; }; largeFrame.appendChild(img); }
+
+function renderEncList(){ clearChildren(encFileList); clearChildren(thumbs); encOutputs=[]; encStatusEls=[];
+  if(encFiles.length===0){ encFileList.innerHTML='<div style="padding:8px" class="muted">কোনো ফাইল নেই</div>'; return; }
+  encFiles.forEach((f,i)=>{ encFileList.appendChild(addEncRow(f,i)); thumbs.appendChild(createThumb(f)); });
+}
+function renderDecList(){ clearChildren(decFileList); decOutputs=[]; decStatusEls=[];
+  if(decFiles.length===0){ decFileList.innerHTML='<div style="padding:8px" class="muted">কোনো ফাইল নেই</div>'; return; }
+  decFiles.forEach((f,i)=>{ decFileList.appendChild(addDecRow(f,i)); });
+}
+
+filesToEncrypt.addEventListener('change', e=>{ encFiles=Array.from(e.target.files||[]); renderEncList(); });
+filesToDecrypt.addEventListener('change', e=>{ decFiles=Array.from(e.target.files||[]); renderDecList(); });
+
+async function encryptSelected(individual=false){
+  encResults.textContent=''; encOutputs=[]; const pw=bulkEncPass.value; if(!pw) return alert('একটি বাল্ক পাসওয়ার্ড দিন');
+  const rows=[...encFileList.querySelectorAll('.file-row')]; const selected=[]; rows.forEach((r,i)=>{ const cb=r.querySelector('input[type="checkbox"]'); if(cb&&cb.checked) selected.push({file:encFiles[i], i}); });
+  if(!selected.length) return alert('কোনো ফাইল নির্বাচন করা হয়নি'); btnEncryptAll.disabled=true;
+  try{
+    for(const item of selected){ const f=item.file, idx=item.i; encStatusEls[idx].textContent='🔄 encrypting…'; const arr=await fileToArrayBuffer(f); const out=await encryptArrayBuffer(arr,pw);
+      encOutputs.push({name:f.name+'.enc', data:new Uint8Array(out)});
+      const url=URL.createObjectURL(new Blob([out],{type:'application/octet-stream'}));
+      const a=document.createElement('a'); a.href=url; a.download=f.name+'.enc'; a.textContent='Download '+f.name+'.enc'; a.style.display='inline-block'; a.style.marginRight='6px'; encResults.appendChild(a);
+      encStatusEls[idx].textContent='🔒 encrypted'; if(individual) await new Promise(r=>setTimeout(r,20)); }
+  }catch(e){ console.error(e); alert('Error: '+e.message); }
+  finally{ btnEncryptAll.disabled=false; }
+}
+
+async function decryptSelected(individual=false){
+  decResults.textContent=''; decOutputs=[]; const pw=bulkDecPass.value; if(!pw) return alert('একটি বাল্ক পাসওয়ার্ড দিন');
+  const rows=[...decFileList.querySelectorAll('.file-row')]; const selected=[]; rows.forEach((r,i)=>{ const cb=r.querySelector('input[type="checkbox"]'); if(cb&&cb.checked) selected.push({file:decFiles[i], i}); });
+  if(!selected.length) return alert('কোনো ফাইল নির্বাচন করা হয়নি'); btnDecryptAll.disabled=true;
+  try{
+    for(const item of selected){ const f=item.file, idx=item.i; decStatusEls[idx].textContent='🔄 decrypting…'; const encBuf=await fileToArrayBuffer(f);
+      try{ const plain=await decryptArrayBuffer(encBuf,pw); const name=f.name.replace(/\.enc$/,'')||('decrypted-'+Date.now()); decOutputs.push({name, data:new Uint8Array(plain)});
+        let mime='application/octet-stream'; const head=new Uint8Array(plain.slice(0,8)); if(head[0]===0x89&&head[1]===0x50&&head[2]===0x4E) mime='image/png'; else if(head[0]===0xFF&&head[1]===0xD8) mime='image/jpeg';
+        const url=URL.createObjectURL(new Blob([plain],{type:mime})); const a=document.createElement('a'); a.href=url; a.download=name; a.textContent='Download '+name; a.style.display='inline-block'; a.style.marginRight='6px'; decResults.appendChild(a);
+        decStatusEls[idx].textContent='🔓 decrypted';
+      }catch(errFile){ decStatusEls[idx].textContent='⚠️ failed'; const e=document.createElement('span'); e.textContent=`${f.name} failed`; e.style.marginRight='8px'; decResults.appendChild(e); }
+      if(individual) await new Promise(r=>setTimeout(r,20)); }
+  }catch(e){ console.error(e); alert('Error: '+e.message); }
+  finally{ btnDecryptAll.disabled=false; }
+}
+
+function downloadZipForEncrypted(){ if(!encOutputs.length) return alert('এনক্রিপ্টেড আউটপুট নেই'); const zip=new Blob([makeZip(encOutputs)],{type:'application/zip'}); triggerDownload(zip,'encrypted_files.zip'); }
+function downloadZipForDecrypted(){ if(!decOutputs.length) return alert('ডিক্রিপ্টেড আউটপুট নেই'); const zip=new Blob([makeZip(decOutputs)],{type:'application/zip'}); triggerDownload(zip,'decrypted_files.zip'); }
+
+// bindings
+btnEncryptAll.addEventListener('click', ()=>encryptSelected(false));
+btnEncryptInd.addEventListener('click', ()=>encryptSelected(true));
+btnDecryptAll.addEventListener('click', ()=>decryptSelected(false));
+btnDecryptInd.addEventListener('click', ()=>decryptSelected(true));
+btnDownloadAllEncrypted.addEventListener('click', downloadZipForEncrypted);
+btnDownloadAllDecrypted.addEventListener('click', downloadZipForDecrypted);
+
+// init
+(function(){ document.getElementById('large-frame').appendChild(document.getElementById('large-placeholder')); })();
+</script>
+</body>
+</html>
